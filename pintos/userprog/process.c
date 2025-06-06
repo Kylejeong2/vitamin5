@@ -41,6 +41,7 @@ static char* parse_args(void* file_name_, int *argc, char ***argv);
 tid_t process_execute(const char *file_name) {
     char *fn_copy;
     tid_t tid;
+    struct thread *current = thread_current();
 
     sema_init(&temporary, 0);
     /* Make a copy of FILE_NAME.
@@ -60,8 +61,30 @@ tid_t process_execute(const char *file_name) {
 
     /* Create a new thread to execute FILE_NAME. */
     tid = thread_create(token, PRI_DEFAULT, start_process, fn_copy);
-    if (tid == TID_ERROR)
+    if (tid == TID_ERROR) {
         palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+
+    /* Set up parent-child relationship */
+    struct thread *child = NULL;
+    struct list_elem *e;
+    struct list *all_list = thread_get_all_list();
+    for (e = list_begin(all_list); e != list_end(all_list); e = list_next(e)) {
+        struct thread *t = list_entry(e, struct thread, allelem);
+        if (t->tid == tid) {
+            child = t;
+            break;
+        }
+    }
+    
+    if (child != NULL) {
+        child->parent_tid = current->tid;
+    }
+
+    /* Wait for child to load - synchronization for exec failure detection */
+    sema_down(&temporary);
+    
     return tid;
 }
 
@@ -132,6 +155,7 @@ static void start_process(void *file_name_) {
     // char *file_name = file_name_;
     struct intr_frame if_;
     bool success;
+    struct thread *current = thread_current();
 
     /* Initialize interrupt frame and load executable. */
     memset(&if_, 0, sizeof if_);
@@ -140,10 +164,29 @@ static void start_process(void *file_name_) {
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(file_name, argc, argv, &if_.eip, &if_.esp);
 
+    /* Signal parent that loading is complete */
+    sema_up(&temporary);
+
     /* If load failed, quit. */
     palloc_free_page(file_name_page);
-    if (!success)
+    if (!success) {
+        /* Clean up argv */
+        if (argv) {
+            for (int i = 0; i < argc; i++) {
+                free(argv[i]);
+            }
+            free(argv);
+        }
         thread_exit();
+    }
+
+    /* Clean up argv */
+    if (argv) {
+        for (int i = 0; i < argc; i++) {
+            free(argv[i]);
+        }
+        free(argv);
+    }
 
     /* Start the user process by simulating a return from an
        interrupt, implemented by intr_exit (in
@@ -165,14 +208,119 @@ static void start_process(void *file_name_) {
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int process_wait(tid_t child_tid UNUSED) {
-    sema_down(&temporary);
-    return 0;
+    struct thread *current = thread_current();
+    struct list_elem *e;
+    struct child_pcb *child_pcb = NULL;
+    
+    /* Search for the child in the parent's children list */
+    for (e = list_begin(&current->children); e != list_end(&current->children);
+         e = list_next(e)) {
+        struct child_pcb *pcb = list_entry(e, struct child_pcb, elem);
+        if (pcb->pid == child_tid) {
+            child_pcb = pcb;
+            break;
+        }
+    }
+    
+    /* If child not found or already waited for, return -1 */
+    if (child_pcb == NULL || child_pcb->has_been_waited) {
+        return -1;
+    }
+    
+    /* Mark as waited for to prevent duplicate waits */
+    child_pcb->has_been_waited = true;
+    
+    /* If child hasn't exited yet, wait for it */
+    if (!child_pcb->has_exited) {
+        sema_down(&child_pcb->wait_sema);
+    }
+    
+    /* Get exit code and clean up */
+    int exit_code = child_pcb->exit_code;
+    list_remove(&child_pcb->elem);
+    free(child_pcb);
+    
+    return exit_code;
 }
 
 /* Free the current process's resources. */
 void process_exit(void) {
     struct thread *cur = thread_current();
     uint32_t *pd;
+
+    /* Close all open file descriptors */
+    for (int i = 0; i < 128; i++) {
+        if (cur->fd_table[i] != NULL) {
+            file_close(cur->fd_table[i]);
+            cur->fd_table[i] = NULL;
+        }
+    }
+
+    /* Close executable file and allow writes again */
+    if (cur->executable != NULL) {
+        file_allow_write(cur->executable);
+        file_close(cur->executable);
+        cur->executable = NULL;
+    }
+
+    /* Notify parent if it's waiting */
+    if (cur->parent_tid != TID_ERROR) {
+        struct thread *parent = NULL;
+        struct list_elem *e;
+        struct list *all_list = thread_get_all_list();
+        
+        /* Find parent thread */
+        for (e = list_begin(all_list); e != list_end(all_list); e = list_next(e)) {
+            struct thread *t = list_entry(e, struct thread, allelem);
+            if (t->tid == cur->parent_tid) {
+                parent = t;
+                break;
+            }
+        }
+        
+        /* Find this process in parent's children list and update exit info */
+        if (parent != NULL) {
+            for (e = list_begin(&parent->children); e != list_end(&parent->children);
+                 e = list_next(e)) {
+                struct child_pcb *pcb = list_entry(e, struct child_pcb, elem);
+                if (pcb->pid == cur->tid) {
+                    pcb->exit_code = cur->exit_status;
+                    pcb->has_exited = true;
+                    sema_up(&pcb->wait_sema);
+                    break;
+                }
+            }
+        }
+    }
+
+    /* Clean up any remaining children PCBs for children that have already exited */
+    struct list_elem *e = list_begin(&cur->children);
+    while (e != list_end(&cur->children)) {
+        struct child_pcb *pcb = list_entry(e, struct child_pcb, elem);
+        struct list_elem *next = list_next(e);
+        
+        if (pcb->has_exited) {
+            list_remove(e);
+            free(pcb);
+        }
+        e = next;
+    }
+
+    /* Mark running children as orphaned - they'll clean up their own PCBs on exit */
+    for (e = list_begin(&cur->children); e != list_end(&cur->children);
+         e = list_next(e)) {
+        struct child_pcb *pcb = list_entry(e, struct child_pcb, elem);
+        /* Find child thread and mark it as orphaned */
+        struct list_elem *t_e;
+        struct list *all_list = thread_get_all_list();
+        for (t_e = list_begin(all_list); t_e != list_end(all_list); t_e = list_next(t_e)) {
+            struct thread *t = list_entry(t_e, struct thread, allelem);
+            if (t->tid == pcb->pid) {
+                t->parent_tid = TID_ERROR; /* Mark as orphaned */
+                break;
+            }
+        }
+    }
 
     /* Destroy the current process's page directory and switch back
        to the kernel-only page directory. */
@@ -189,7 +337,6 @@ void process_exit(void) {
         pagedir_activate(NULL);
         pagedir_destroy(pd);
     }
-    sema_up(&temporary);
 }
 
 /* Sets up the CPU for running user code in the current
@@ -359,7 +506,7 @@ bool load(const char *file_name, int argc, char** argv, void (**eip)(void), void
         }
     }
 
-    /* Set up stack. */
+    /* Setup argument stack. */
     if (!setup_stack(argc, argv, esp))
         goto done;
 
@@ -370,7 +517,13 @@ bool load(const char *file_name, int argc, char** argv, void (**eip)(void), void
 
 done:
     /* We arrive here whether the load is successful or not. */
-    file_close(file);
+    if (success) {
+        /* Store executable file and deny writes to it */
+        t->executable = file;
+        file_deny_write(file);
+    } else {
+        file_close(file);
+    }
     return success;
 }
 

@@ -338,6 +338,11 @@ int thread_get_recent_cpu(void) {
     return 0;
 }
 
+/* Returns a pointer to the all_list for process management */
+struct list *thread_get_all_list(void) {
+    return &all_list;
+}
+
 /* Idle thread.  Executes when no other thread is ready to run.
 
    The idle thread is initially put on the ready list by
@@ -422,6 +427,14 @@ static void init_thread(struct thread *t, const char *name, int priority) {
     for (int i = 0; i < 128; i++) {
         t -> fd_table[i] = NULL;
     }
+
+    /* Initialize child process management fields */
+    t->parent_tid = TID_ERROR;           /* No parent initially */
+    list_init(&t->children);             /* Initialize children list */
+    t->exit_status = 0;                  /* Default exit status */
+    t->has_exited = false;               /* Process hasn't exited yet */
+    sema_init(&t->wait_sema, 0);         /* Initialize wait semaphore */
+    t->executable = NULL;                /* No executable file initially */
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and

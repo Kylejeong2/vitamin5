@@ -26,6 +26,9 @@ typedef int tid_t;
 #define PRI_DEFAULT 31 /* Default priority. */
 #define PRI_MAX 63 /* Highest priority. */
 
+/* Forward declarations */
+struct child_pcb;
+
 /* A kernel thread or user process.
 
    Each thread structure is stored in its own 4 kB page.  The
@@ -96,6 +99,14 @@ struct thread {
 
     struct file *fd_table[128];
 
+    /* Process control fields for parent-child relationships */
+    tid_t parent_tid;                    /* Parent thread ID */
+    struct list children;                /* List of child PCB entries */
+    int exit_status;                     /* Exit status of this process */
+    bool has_exited;                     /* Whether this process has exited */
+    struct semaphore wait_sema;          /* Semaphore for parent to wait on */
+    struct file *executable;             /* Keep executable open to deny writes */
+
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir; /* Page directory. */
@@ -103,6 +114,16 @@ struct thread {
 
     /* Owned by thread.c. */
     unsigned magic; /* Detects stack overflow. */
+};
+
+/* Child process control block entry */
+struct child_pcb {
+    tid_t pid;                           /* Child process ID */
+    int exit_code;                       /* Child's exit code */
+    bool has_exited;                     /* Whether child has exited */
+    bool has_been_waited;                /* Whether parent has called wait */
+    struct list_elem elem;               /* List element for parent's children list */
+    struct semaphore wait_sema;          /* Semaphore for parent to wait on */
 };
 
 /* If false (default), use round-robin scheduler.
@@ -140,5 +161,7 @@ int thread_get_nice(void);
 void thread_set_nice(int);
 int thread_get_recent_cpu(void);
 int thread_get_load_avg(void);
+
+struct list *thread_get_all_list(void);
 
 #endif /* threads/thread.h */
