@@ -10,11 +10,18 @@
 #include "threads/vaddr.h"
 #include "filesys/file.h"
 #include "devices/input.h"
+#include "devices/shutdown.h"
+#include "userprog/process.h"
+#include "threads/synch.h"
+
+/* Global lock for file system operations */
+static struct lock filesys_lock;
 
 static void syscall_handler(struct intr_frame *);
 
 void syscall_init(void) {
     intr_register_int(0x30, 3, INTR_ON, syscall_handler, "syscall");
+    lock_init(&filesys_lock);
 }
 
 static void syscall_handler(struct intr_frame *f UNUSED) {
@@ -29,18 +36,44 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
     /* printf("System call number: %d\n", args[0]); */
 
+    /* Validate the syscall number pointer */
+    validate_user_addr(args);
 
-    if (args[0] == SYS_EXIT) {
-        f->eax = args[1];
-        printf("%s: exit(%d)\n", thread_current()->name, args[1]);
-        thread_exit();
+    if (args[0] == SYS_HALT) {
+        shutdown_power_off();
     }
 
-    else if (args[0] == SYS_INCREMENT) {
-        f->eax = args[1] + 1;
+    else if (args[0] == SYS_EXIT) {
+        validate_user_addr(&args[1]);
+        f->eax = args[1];
+        syscall_exit(args[1]);
+    }
+
+    else if (args[0] == SYS_EXEC) {
+        validate_user_addr(&args[1]);
+        const char *cmd_line = (char *) args[1];
+        
+        if (cmd_line == NULL) {
+            syscall_exit(-1);
+        }
+        
+        validate_user_string(cmd_line);
+        
+        pid_t pid = process_execute(cmd_line);
+        f->eax = pid;
+    }
+    
+    else if (args[0] == SYS_WAIT) {
+        validate_user_addr(&args[1]);
+        pid_t pid = (pid_t) args[1];
+        
+        int exit_code = process_wait(pid);
+        f->eax = exit_code;
     }
 
     else if (args[0] == SYS_CREATE) {
+        validate_user_addr(&args[1]);
+        validate_user_addr(&args[2]);
         const char *file = (char *) args[1];
         off_t size = (off_t) args[2];
 
@@ -50,11 +83,14 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         validate_user_string(file);
 
+        lock_acquire(&filesys_lock);
         bool success = filesys_create(file, size);
+        lock_release(&filesys_lock);
         f->eax = success;
     }
 
     else if (args[0] == SYS_REMOVE) {
+        validate_user_addr(&args[1]);
         const char *file = (char *) args[1];
 
         if (file == NULL) {
@@ -63,10 +99,14 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         validate_user_string(file);
 
-        f->eax = filesys_remove(file);
+        lock_acquire(&filesys_lock);
+        bool success = filesys_remove(file);
+        lock_release(&filesys_lock);
+        f->eax = success;
     }
 
     else if (args[0] == SYS_OPEN) {
+        validate_user_addr(&args[1]);
         const char *file = (char *) args[1];
 
         if (file == NULL) {
@@ -75,7 +115,9 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         validate_user_string(file);
 
+        lock_acquire(&filesys_lock);
         struct file *open_file = filesys_open(file);
+        lock_release(&filesys_lock);
 
         if (open_file == NULL) {
             f -> eax = -1;
@@ -96,12 +138,15 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
             t -> fd_table[fd] = open_file;
             f -> eax = fd + 2;
         } else {
+            lock_acquire(&filesys_lock);
             file_close(open_file);
+            lock_release(&filesys_lock);
             f -> eax = -1;
         }
     }
 
     else if (args[0] == SYS_FILESIZE) {
+        validate_user_addr(&args[1]);
         int fd = (int) args[1];
 
         if (fd < 2) {
@@ -118,12 +163,17 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         struct file* file = t->fd_table[fd - 2];
 
+        lock_acquire(&filesys_lock);
         int size = file_length(file);
+        lock_release(&filesys_lock);
 
         f->eax = size;
     }
 
     else if (args[0] == SYS_READ) {
+        validate_user_addr(&args[1]);
+        validate_user_addr(&args[2]);
+        validate_user_addr(&args[3]);
         int fd = (int) args[1];
         void *buffer = (void *) args[2];
         unsigned size = (unsigned) args[3];
@@ -158,12 +208,17 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         struct file* file = t->fd_table[fd - 2];
 
+        lock_acquire(&filesys_lock);
         int bytes = file_read(file, buffer, size);
+        lock_release(&filesys_lock);
 
         f -> eax = bytes;
     }
 
     else if (args[0] == SYS_WRITE) {
+        validate_user_addr(&args[1]);
+        validate_user_addr(&args[2]);
+        validate_user_addr(&args[3]);
         int fd = (int) args[1];
         void *buffer = (void *) args[2];
         unsigned size = (unsigned) args[3];
@@ -189,12 +244,16 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
         
         struct file* file = t->fd_table[fd - 2];
 
+        lock_acquire(&filesys_lock);
         int bytes = file_write(file, buffer, size);
+        lock_release(&filesys_lock);
 
         f -> eax = bytes;
     }
 
     else if (args[0] == SYS_SEEK) {
+        validate_user_addr(&args[1]);
+        validate_user_addr(&args[2]);
         int fd = (int) args[1];
         unsigned position = (unsigned) args[2];
 
@@ -212,10 +271,13 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         struct file* file = t->fd_table[fd - 2];
 
+        lock_acquire(&filesys_lock);
         file_seek(file, position);
+        lock_release(&filesys_lock);
     }
 
     else if (args[0] == SYS_TELL) {
+        validate_user_addr(&args[1]);
         int fd = (int) args[1];
 
         if (fd < 2) {
@@ -232,10 +294,15 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         struct file* file = t->fd_table[fd - 2];
 
-        f->eax = file_tell(file);
+        lock_acquire(&filesys_lock);
+        unsigned pos = file_tell(file);
+        lock_release(&filesys_lock);
+        
+        f->eax = pos;
     }
 
     else if (args[0] == SYS_CLOSE) {
+        validate_user_addr(&args[1]);
         int fd = (int) args[1];
 
         if (fd < 2) {
@@ -254,11 +321,16 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
         t->fd_table[fd - 2] = NULL;
 
+        lock_acquire(&filesys_lock);
         file_close(file);
+        lock_release(&filesys_lock);
     }
 
+    else if (args[0] == SYS_INCREMENT) {
+        validate_user_addr(&args[1]);
+        f->eax = args[1] + 1;
+    }
 }
-
 
 void validate_user_addr(const void *addr) {
     if (addr == NULL || !is_user_vaddr(addr) || pagedir_get_page(thread_current()->pagedir, addr) == NULL) {
@@ -282,8 +354,19 @@ void validate_user_string(const char *str) {
 }
 
 void syscall_exit(int status) {
-    printf("%s: exit(%d)\n", thread_current()->name, status);
-    //thread_current()->exit_status = status;
+    struct thread *cur = thread_current();
+    cur->exit_code = status;
+    
+    printf("%s: exit(%d)\n", cur->name, status);
+    
+    /* If this process has a PCB (meaning it has a parent), 
+       update the PCB with exit information */
+    if (cur->pcb != NULL) {
+        cur->pcb->exit_code = status;
+        cur->pcb->has_exited = true;
+        sema_up(&cur->pcb->wait_sema);
+    }
+    
     thread_exit();
 }
 

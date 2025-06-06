@@ -29,7 +29,6 @@ char *strdup(const char *s) {
     return new;
 }
 
-static struct semaphore temporary;
 static thread_func start_process NO_RETURN;
 static bool load(const char *file_name, int argc, char** argv, void (**eip)(void), void **esp);
 static char* parse_args(void* file_name_, int *argc, char ***argv);
@@ -41,8 +40,8 @@ static char* parse_args(void* file_name_, int *argc, char ***argv);
 tid_t process_execute(const char *file_name) {
     char *fn_copy;
     tid_t tid;
+    struct thread *cur = thread_current();
 
-    sema_init(&temporary, 0);
     /* Make a copy of FILE_NAME.
        Otherwise there's a race between the caller and load(). */
     fn_copy = palloc_get_page(0);
@@ -55,13 +54,45 @@ tid_t process_execute(const char *file_name) {
     strlcpy(prog_name, file_name, NAME_MAX + 1);
     char *save_ptr;
     char *token = strtok_r(prog_name, " ", &save_ptr);
-    if (token == NULL)
+    if (token == NULL) {
+        palloc_free_page(fn_copy);
         return TID_ERROR;
+    }
+
+    /* Create a child PCB for this new process */
+    struct child_pcb *child_pcb = malloc(sizeof(struct child_pcb));
+    if (child_pcb == NULL) {
+        palloc_free_page(fn_copy);
+        return TID_ERROR;
+    }
+
+    /* Initialize the child PCB */
+    child_pcb->pid = TID_ERROR; /* Will be set after thread_create succeeds */
+    child_pcb->exit_code = -1;
+    child_pcb->has_exited = false;
+    child_pcb->has_been_waited = false;
+    sema_init(&child_pcb->wait_sema, 0);
 
     /* Create a new thread to execute FILE_NAME. */
     tid = thread_create(token, PRI_DEFAULT, start_process, fn_copy);
-    if (tid == TID_ERROR)
+    if (tid == TID_ERROR) {
         palloc_free_page(fn_copy);
+        free(child_pcb);
+        return TID_ERROR;
+    }
+
+    /* Update child PCB with actual PID and add to parent's children list */
+    child_pcb->pid = tid;
+    lock_acquire(&cur->children_lock);
+    list_push_back(&cur->children, &child_pcb->elem);
+    lock_release(&cur->children_lock);
+
+    /* Find the child thread and set its PCB pointer */
+    struct thread *child_thread = thread_find_by_tid(tid);
+    if (child_thread != NULL) {
+        child_thread->pcb = child_pcb;
+    }
+
     return tid;
 }
 
@@ -124,12 +155,10 @@ static char* parse_args(void* file_name_, int *argc, char ***argv) {
    running. */
 static void start_process(void *file_name_) {
     char *file_name_page = file_name_;
-    char *cmdline = file_name_page;
     // parse file_name_ to get arguments
     int argc;
     char **argv;
     char *file_name = parse_args(file_name_, &argc, &argv);
-    // char *file_name = file_name_;
     struct intr_frame if_;
     bool success;
 
@@ -165,14 +194,91 @@ static void start_process(void *file_name_) {
    This function will be implemented in problem 2-2.  For now, it
    does nothing. */
 int process_wait(tid_t child_tid UNUSED) {
-    sema_down(&temporary);
-    return 0;
+    struct thread *cur = thread_current();
+    struct child_pcb *child_pcb = NULL;
+    struct list_elem *e;
+    
+    /* Search for the child in parent's children list */
+    lock_acquire(&cur->children_lock);
+    for (e = list_begin(&cur->children); e != list_end(&cur->children); e = list_next(e)) {
+        struct child_pcb *pcb = list_entry(e, struct child_pcb, elem);
+        if (pcb->pid == child_tid) {
+            child_pcb = pcb;
+            break;
+        }
+    }
+    
+    /* If child not found or already waited, return -1 */
+    if (child_pcb == NULL || child_pcb->has_been_waited) {
+        lock_release(&cur->children_lock);
+        return -1;
+    }
+    
+    /* Mark as waited to prevent duplicate waits */
+    child_pcb->has_been_waited = true;
+    lock_release(&cur->children_lock);
+    
+    /* If child hasn't exited yet, wait for it */
+    if (!child_pcb->has_exited) {
+        sema_down(&child_pcb->wait_sema);
+    }
+    
+    /* Get the exit code and clean up */
+    int exit_code = child_pcb->exit_code;
+    
+    /* Remove from children list and free the PCB */
+    lock_acquire(&cur->children_lock);
+    list_remove(&child_pcb->elem);
+    lock_release(&cur->children_lock);
+    free(child_pcb);
+    
+    return exit_code;
 }
 
 /* Free the current process's resources. */
 void process_exit(void) {
     struct thread *cur = thread_current();
     uint32_t *pd;
+
+    /* Close all open file descriptors */
+    for (int i = 0; i < 128; i++) {
+        if (cur->fd_table[i] != NULL) {
+            file_close(cur->fd_table[i]);
+            cur->fd_table[i] = NULL;
+        }
+    }
+
+    /* Close executable file to allow writes */
+    if (cur->executable != NULL) {
+        file_allow_write(cur->executable);
+        file_close(cur->executable);
+        cur->executable = NULL;
+    }
+
+    /* Clean up all child PCBs for children that have already exited (zombies) */
+    struct list_elem *e, *next;
+    lock_acquire(&cur->children_lock);
+    for (e = list_begin(&cur->children); e != list_end(&cur->children); e = next) {
+        next = list_next(e);
+        struct child_pcb *child_pcb = list_entry(e, struct child_pcb, elem);
+        
+        /* If child has exited and hasn't been waited for, clean it up */
+        if (child_pcb->has_exited && !child_pcb->has_been_waited) {
+            list_remove(&child_pcb->elem);
+            free(child_pcb);
+        }
+        /* If child is still running, mark its PCB as orphaned so it can clean itself up */
+        else if (!child_pcb->has_exited) {
+            /* Find the child thread and clear its PCB pointer so it knows it's orphaned */
+            struct thread *child_thread = thread_find_by_tid(child_pcb->pid);
+            if (child_thread != NULL) {
+                child_thread->pcb = NULL;
+            }
+            list_remove(&child_pcb->elem);
+            free(child_pcb);
+        }
+    }
+    lock_release(&cur->children_lock);
 
     /* Destroy the current process's page directory and switch back
        to the kernel-only page directory. */
@@ -189,7 +295,6 @@ void process_exit(void) {
         pagedir_activate(NULL);
         pagedir_destroy(pd);
     }
-    sema_up(&temporary);
 }
 
 /* Sets up the CPU for running user code in the current
@@ -298,6 +403,9 @@ bool load(const char *file_name, int argc, char** argv, void (**eip)(void), void
         goto done;
     }
 
+    /* Deny writes to the executable */
+    file_deny_write(file);
+
     /* Read and verify executable header. */
     if (file_read(file, &ehdr, sizeof ehdr) != sizeof ehdr ||
         memcmp(ehdr.e_ident, "\177ELF\1\1\1", 7) || ehdr.e_type != 2 ||
@@ -370,7 +478,16 @@ bool load(const char *file_name, int argc, char** argv, void (**eip)(void), void
 
 done:
     /* We arrive here whether the load is successful or not. */
-    file_close(file);
+    if (success) {
+        /* Keep the executable file open to deny writes */
+        t->executable = file;
+    } else {
+        /* Close file if load failed */
+        if (file != NULL) {
+            file_allow_write(file);
+            file_close(file);
+        }
+    }
     return success;
 }
 

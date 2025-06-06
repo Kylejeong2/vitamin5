@@ -21,6 +21,9 @@ enum thread_status {
 typedef int tid_t;
 #define TID_ERROR ((tid_t) -1) /* Error value for tid_t. */
 
+/* Process identifier type - same as thread id in Pintos */
+typedef tid_t pid_t;
+
 /* Thread priorities. */
 #define PRI_MIN 0 /* Lowest priority. */
 #define PRI_DEFAULT 31 /* Default priority. */
@@ -82,6 +85,17 @@ typedef int tid_t;
    only because they are mutually exclusive: only a thread in the
    ready state is on the run queue, whereas only a thread in the
    blocked state is on a semaphore wait list. */
+
+/* Child process control block for parent-child synchronization */
+struct child_pcb {
+    pid_t pid;                    /* Child process ID */
+    int exit_code;                /* Exit code when child terminates */
+    bool has_exited;              /* Flag indicating if child has exited */
+    bool has_been_waited;         /* Flag to prevent duplicate waits */
+    struct semaphore wait_sema;   /* Semaphore for parent to wait on child */
+    struct list_elem elem;        /* List element for parent's children list */
+};
+
 struct thread {
     /* Owned by thread.c. */
     tid_t tid; /* Thread identifier. */
@@ -99,6 +113,13 @@ struct thread {
 #ifdef USERPROG
     /* Owned by userprog/process.c. */
     uint32_t *pagedir; /* Page directory. */
+    
+    /* Process management fields */
+    struct list children;         /* List of child PCBs */
+    struct child_pcb *pcb;        /* This process's PCB (allocated by parent) */
+    struct lock children_lock;    /* Lock for accessing children list */
+    int exit_code;                /* This process's exit code */
+    struct file *executable;      /* Keep executable open to deny writes */
 #endif
 
     /* Owned by thread.c. */
@@ -125,6 +146,7 @@ void thread_unblock(struct thread *);
 struct thread *thread_current(void);
 tid_t thread_tid(void);
 const char *thread_name(void);
+struct thread *thread_find_by_tid(tid_t tid);
 
 void thread_exit(void) NO_RETURN;
 void thread_yield(void);
