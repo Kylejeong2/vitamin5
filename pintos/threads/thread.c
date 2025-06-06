@@ -418,6 +418,10 @@ static void init_thread(struct thread *t, const char *name, int priority) {
     old_level = intr_disable();
     list_push_back(&all_list, &t->allelem);
     intr_set_level(old_level);
+
+    for (int i = 0; i < 128; i++) {
+        t -> fd_table[i] = NULL;
+    }
 }
 
 /* Allocates a SIZE-byte frame at the top of thread T's stack and

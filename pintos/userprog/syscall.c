@@ -8,6 +8,8 @@
 #include "threads/thread.h"
 #include "filesys/filesys.h"
 #include "threads/vaddr.h"
+#include "filesys/file.h"
+#include "devices/input.h"
 
 static void syscall_handler(struct intr_frame *);
 
@@ -38,11 +40,6 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
         f->eax = args[1] + 1;
     }
 
-    else if (args[0] == SYS_WRITE) {
-        putbuf((const char *) args[2], args[3]);
-        f->eax = args[3];
-    }
-
     else if (args[0] == SYS_CREATE) {
         const char *file = (char *) args[1];
         off_t size = (off_t) args[2];
@@ -58,35 +55,208 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_REMOVE) {
+        const char *file = (char *) args[1];
 
+        if (file == NULL) {
+            syscall_exit(-1);
+        }
+
+        validate_user_string(file);
+
+        f->eax = filesys_remove(file);
     }
 
     else if (args[0] == SYS_OPEN) {
+        const char *file = (char *) args[1];
 
+        if (file == NULL) {
+            syscall_exit(-1);
+        }
+
+        validate_user_string(file);
+
+        struct file *open_file = filesys_open(file);
+
+        if (open_file == NULL) {
+            f -> eax = -1;
+            return;
+        }
+
+        struct thread *t = thread_current();
+        
+        int fd;
+
+        for (fd = 0; fd < 128; fd++) {
+            if (t -> fd_table[fd] == NULL) {
+                break;
+            }
+        }
+
+        if (fd < 128) {
+            t -> fd_table[fd] = open_file;
+            f -> eax = fd + 2;
+        } else {
+            file_close(open_file);
+            f -> eax = -1;
+        }
     }
 
     else if (args[0] == SYS_FILESIZE) {
+        int fd = (int) args[1];
 
+        if (fd < 2) {
+            f->eax = -1;
+            return;
+        }
+
+        struct thread *t = thread_current();
+
+        if (fd - 2 >= 128 || t->fd_table[fd - 2] == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        struct file* file = t->fd_table[fd - 2];
+
+        int size = file_length(file);
+
+        f->eax = size;
     }
 
     else if (args[0] == SYS_READ) {
+        int fd = (int) args[1];
+        void *buffer = (void *) args[2];
+        unsigned size = (unsigned) args[3];
 
+        if (buffer == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        validate_user_buffer(buffer, size);
+
+        // do for fd == 0 and 1
+        if (fd < 0 || fd == 1) {
+            f->eax = -1;
+            return;
+        }
+
+        if (fd == 0) {
+            uint8_t *buf = (uint8_t *) buffer;
+            for (unsigned i = 0; i < size; i++) {
+                buf[i] = input_getc();
+            }
+            f->eax = size;
+            return;
+        }
+
+        struct thread *t = thread_current();
+
+        if (fd - 2 >= 128 || t->fd_table[fd - 2] == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        struct file* file = t->fd_table[fd - 2];
+
+        int bytes = file_read(file, buffer, size);
+
+        f -> eax = bytes;
     }
 
     else if (args[0] == SYS_WRITE) {
+        int fd = (int) args[1];
+        void *buffer = (void *) args[2];
+        unsigned size = (unsigned) args[3];
 
+        if (buffer == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        validate_user_buffer(buffer, size);
+
+        struct thread *t = thread_current();
+
+        if (fd < 1 || fd - 2 >= 128 || t->fd_table[fd - 2] == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        if (fd == 1) {
+            putbuf((const char *) buffer, size);
+            f->eax = size;
+            return;
+        }
+        
+        struct file* file = t->fd_table[fd - 2];
+
+        int bytes = file_write(file, buffer, size);
+
+        f -> eax = bytes;
     }
 
     else if (args[0] == SYS_SEEK) {
+        int fd = (int) args[1];
+        unsigned position = (unsigned) args[2];
 
+        if (fd < 2) {
+            f->eax = -1;
+            return;
+        }
+
+        struct thread *t = thread_current();
+
+        if (fd - 2 >= 128 || t->fd_table[fd - 2] == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        struct file* file = t->fd_table[fd - 2];
+
+        file_seek(file, position);
     }
 
     else if (args[0] == SYS_TELL) {
+        int fd = (int) args[1];
 
+        if (fd < 2) {
+            f->eax = -1;
+            return;
+        }
+
+        struct thread *t = thread_current();
+
+        if (fd - 2 >= 128 || t->fd_table[fd - 2] == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        struct file* file = t->fd_table[fd - 2];
+
+        f->eax = file_tell(file);
     }
 
     else if (args[0] == SYS_CLOSE) {
+        int fd = (int) args[1];
 
+        if (fd < 2) {
+            f->eax = -1;
+            return;
+        }
+
+        struct thread *t = thread_current();
+
+        if (fd - 2 >= 128 || t->fd_table[fd - 2] == NULL) {
+            f->eax = -1;
+            return;
+        }
+
+        struct file* file = t->fd_table[fd - 2];
+
+        t->fd_table[fd - 2] = NULL;
+
+        file_close(file);
     }
 
 }
