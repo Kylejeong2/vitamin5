@@ -129,8 +129,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
         unsigned size = (unsigned) args[3];
 
         if (buffer == NULL) {
-            f->eax = -1;
-            return;
+            syscall_exit(-1);
         }
 
         validate_user_buffer(buffer, size);
@@ -170,8 +169,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
         unsigned size = (unsigned) args[3];
 
         if (buffer == NULL) {
-            f->eax = -1;
-            return;
+            syscall_exit(-1);
         }
 
         validate_user_buffer(buffer, size);
