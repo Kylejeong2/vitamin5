@@ -71,7 +71,9 @@ tid_t process_execute(const char *file_name) {
     child_pcb->exit_code = -1;
     child_pcb->has_exited = false;
     child_pcb->has_been_waited = false;
+    child_pcb->load_success = false; /* Track if load was successful */
     sema_init(&child_pcb->wait_sema, 0);
+    sema_init(&child_pcb->load_sema, 0); /* Semaphore for load synchronization */
 
     /* Create a new thread to execute FILE_NAME. */
     tid = thread_create(token, PRI_DEFAULT, start_process, fn_copy);
@@ -91,6 +93,19 @@ tid_t process_execute(const char *file_name) {
     struct thread *child_thread = thread_find_by_tid(tid);
     if (child_thread != NULL) {
         child_thread->pcb = child_pcb;
+    }
+
+    /* Wait for the child to complete loading */
+    sema_down(&child_pcb->load_sema);
+    
+    /* Check if load was successful */
+    if (!child_pcb->load_success) {
+        /* Load failed, clean up and return -1 */
+        lock_acquire(&cur->children_lock);
+        list_remove(&child_pcb->elem);
+        lock_release(&cur->children_lock);
+        free(child_pcb);
+        return -1;
     }
 
     return tid;
@@ -168,6 +183,13 @@ static void start_process(void *file_name_) {
     if_.cs = SEL_UCSEG;
     if_.eflags = FLAG_IF | FLAG_MBS;
     success = load(file_name, argc, argv, &if_.eip, &if_.esp);
+
+    /* Signal parent about load success/failure */
+    struct thread *cur = thread_current();
+    if (cur->pcb != NULL) {
+        cur->pcb->load_success = success;
+        sema_up(&cur->pcb->load_sema);
+    }
 
     /* If load failed, quit. */
     palloc_free_page(file_name_page);

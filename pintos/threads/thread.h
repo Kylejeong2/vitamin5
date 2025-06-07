@@ -92,7 +92,9 @@ struct child_pcb {
     int exit_code;                /* Exit code when child terminates */
     bool has_exited;              /* Flag indicating if child has exited */
     bool has_been_waited;         /* Flag to prevent duplicate waits */
+    bool load_success;            /* Flag indicating if executable loaded successfully */
     struct semaphore wait_sema;   /* Semaphore for parent to wait on child */
+    struct semaphore load_sema;   /* Semaphore for load synchronization */
     struct list_elem elem;        /* List element for parent's children list */
 };
 

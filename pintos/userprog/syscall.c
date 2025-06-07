@@ -36,21 +36,21 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
 
     /* printf("System call number: %d\n", args[0]); */
 
-    /* Validate the syscall number pointer */
-    validate_user_addr(args);
+    /* Validate the syscall number (4 bytes) */
+    validate_user_ptr(args, sizeof(int));
 
     if (args[0] == SYS_HALT) {
         shutdown_power_off();
     }
 
     else if (args[0] == SYS_EXIT) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(int));
         f->eax = args[1];
         syscall_exit(args[1]);
     }
 
     else if (args[0] == SYS_EXEC) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(char*));
         const char *cmd_line = (char *) args[1];
         
         if (cmd_line == NULL) {
@@ -64,7 +64,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
     
     else if (args[0] == SYS_WAIT) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(pid_t));
         pid_t pid = (pid_t) args[1];
         
         int exit_code = process_wait(pid);
@@ -72,8 +72,8 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_CREATE) {
-        validate_user_addr(&args[1]);
-        validate_user_addr(&args[2]);
+        validate_user_ptr(&args[1], sizeof(char*));
+        validate_user_ptr(&args[2], sizeof(off_t));
         const char *file = (char *) args[1];
         off_t size = (off_t) args[2];
 
@@ -90,7 +90,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_REMOVE) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(char*));
         const char *file = (char *) args[1];
 
         if (file == NULL) {
@@ -106,7 +106,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_OPEN) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(char*));
         const char *file = (char *) args[1];
 
         if (file == NULL) {
@@ -146,7 +146,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_FILESIZE) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(int));
         int fd = (int) args[1];
 
         if (fd < 2) {
@@ -171,9 +171,9 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_READ) {
-        validate_user_addr(&args[1]);
-        validate_user_addr(&args[2]);
-        validate_user_addr(&args[3]);
+        validate_user_ptr(&args[1], sizeof(int));
+        validate_user_ptr(&args[2], sizeof(void*));
+        validate_user_ptr(&args[3], sizeof(unsigned));
         int fd = (int) args[1];
         void *buffer = (void *) args[2];
         unsigned size = (unsigned) args[3];
@@ -216,9 +216,9 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_WRITE) {
-        validate_user_addr(&args[1]);
-        validate_user_addr(&args[2]);
-        validate_user_addr(&args[3]);
+        validate_user_ptr(&args[1], sizeof(int));
+        validate_user_ptr(&args[2], sizeof(void*));
+        validate_user_ptr(&args[3], sizeof(unsigned));
         int fd = (int) args[1];
         void *buffer = (void *) args[2];
         unsigned size = (unsigned) args[3];
@@ -252,8 +252,8 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_SEEK) {
-        validate_user_addr(&args[1]);
-        validate_user_addr(&args[2]);
+        validate_user_ptr(&args[1], sizeof(int));
+        validate_user_ptr(&args[2], sizeof(unsigned));
         int fd = (int) args[1];
         unsigned position = (unsigned) args[2];
 
@@ -277,7 +277,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_TELL) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(int));
         int fd = (int) args[1];
 
         if (fd < 2) {
@@ -302,7 +302,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_CLOSE) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(int));
         int fd = (int) args[1];
 
         if (fd < 2) {
@@ -327,7 +327,7 @@ static void syscall_handler(struct intr_frame *f UNUSED) {
     }
 
     else if (args[0] == SYS_INCREMENT) {
-        validate_user_addr(&args[1]);
+        validate_user_ptr(&args[1], sizeof(int));
         f->eax = args[1] + 1;
     }
 }
@@ -350,6 +350,14 @@ void validate_user_string(const char *str) {
         validate_user_addr(str);
         if (*str == '\0') break;
         str++;
+    }
+}
+
+/* New function to validate multi-byte data */
+void validate_user_ptr(const void *ptr, size_t size) {
+    uint8_t *byte_ptr = (uint8_t *) ptr;
+    for (size_t i = 0; i < size; i++) {
+        validate_user_addr(byte_ptr + i);
     }
 }
 
